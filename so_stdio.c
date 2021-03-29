@@ -10,13 +10,13 @@
 #define BUFSIZE 4096
 #define ALL_PERMISIONS 0644
 #define READ_OP 1
-#define WRITE_Op 2
+#define WRITE_OP 2
 
 struct _so_file {
     int file_descriptor;
     char *buffer;
     int bytes_in_buffer;
-    int file_position;
+    long file_position;
     int last_operation;
     int reached_end;
 };
@@ -72,12 +72,16 @@ SO_FILE *so_fopen(const char *pathname, const char *mode)
 int so_fclose(SO_FILE *stream)
 {
     int rc;
-
+    
+    rc = so_fflush(stream);
+    if (rc < 0) {
+        perror("fflush failed.");
+        return SO_EOF;
+    }
     rc = close(stream->file_descriptor);
-
+    
     free(stream->buffer);
     free(stream);
-
     if (rc < 0) {
         perror("Close failed.");
         return SO_EOF;
@@ -93,16 +97,20 @@ int so_fgetc(SO_FILE *stream)
     
     // Daca bufferul e gol sau s-a ajuns la finalul bufferului se face syscall
     if (stream->bytes_in_buffer == 0 || stream->file_position == stream->bytes_in_buffer){
+        
         stream->file_position = 0;
         memset(stream->buffer, 0, BUFSIZE);
         stream->bytes_in_buffer = read(stream->file_descriptor, stream->buffer, BUFSIZE);
+
         if (stream->bytes_in_buffer <= 0) {
+            //printf("aici\n");
             stream->reached_end = 1;
             return SO_EOF;
         }
         
     }
-    result = (int)stream->buffer[stream->file_position];    
+    result = (unsigned char)(stream->buffer[stream->file_position]);
+       
     stream->file_position++;
     // Marcheaza citirea ca ultima operatie efectuata
     stream->last_operation = READ_OP;
@@ -111,30 +119,51 @@ int so_fgetc(SO_FILE *stream)
 
 size_t so_fread(void *ptr, size_t size, size_t nmemb, SO_FILE *stream)
 {
-    int char_read = 0, bytes_read = 0;
-
+    int char_read = 0;
+   // printf("%ld %ld\n", size, nmemb);
     for (size_t i = 0; i < nmemb * size; i++)
     {
-        char_read = so_fgetc(stream);
-        if (char_read < 0) {
-            return SO_EOF;
+        char_read = so_fgetc(stream);  
+        if (char_read == SO_EOF) {
+            return i;
         }
         *(((char *)ptr) + i) = (char)char_read; 
-        bytes_read++;
     }
     
-    return bytes_read;
+    return nmemb;
 }
 
 int so_fputc(int c, SO_FILE *stream) {
-    int rc;
+    int bytes_written = 0, rc = 0;
 
-    // so_fflush
-    rc = write(stream->file_descriptor, stream->buffer, 1);
-    if (rc < 0)
-        return SO_EOF;
-    
+    if (stream->file_position >= BUFSIZE) {
+        rc = so_fflush(stream);
+        if (rc < 0) {
+            perror("Fflush failed.");
+            return SO_EOF;
+        }
+    }
+    stream->buffer[stream->file_position] = c;
+    stream->file_position++;
+    stream->bytes_in_buffer++;
+    stream->last_operation = WRITE_OP;
+    //printf("%c\n", c);
     return c;
+}
+
+size_t so_fwrite(const void *ptr, size_t size, size_t nmemb, SO_FILE *stream)
+{
+    
+    int byte_written, result;
+    for (size_t i = 0; i < size * nmemb; i++) {
+        byte_written = so_fputc(*((unsigned char *)ptr + i), stream);
+        
+        if (byte_written == SO_EOF) {
+            perror("Fputc failed.");
+            return i;
+        }
+    }
+    return nmemb;
 }
 
 int so_fileno(SO_FILE *stream) {
@@ -143,7 +172,20 @@ int so_fileno(SO_FILE *stream) {
 
 int so_fflush(SO_FILE *stream)
 {
+    int rc;
+
+    if (stream->last_operation == WRITE_OP) {
+        rc = write(stream->file_descriptor, stream->buffer, stream->bytes_in_buffer);
+        if (rc < 0) {
+            perror("Fflush error.");
+            return SO_EOF;
+        }
+    }
+    memset(stream->buffer, 0, BUFSIZE);
+    stream->file_position = 0;
+    stream->bytes_in_buffer = 0;
     return 0;
+    
 }
 
 int so_fseek(SO_FILE *stream, long offset, int whence)
@@ -153,20 +195,12 @@ int so_fseek(SO_FILE *stream, long offset, int whence)
 
 long so_ftell(SO_FILE *stream)
 {
-    
-    return (stream->buffer[stream->file_position] == '\0') ? -1 : 0;
-}
-
-
-
-size_t so_fwrite(const void *ptr, size_t size, size_t nmemb, SO_FILE *stream)
-{
-    return 0;
+    return stream->file_position;
 }
 
 int so_feof(SO_FILE *stream)
 {
-    return 0;
+    return stream->reached_end == 1 ? 1 : 0;
 }
 
 int so_ferror(SO_FILE *stream) {
