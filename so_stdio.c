@@ -12,8 +12,8 @@
 
 #define BUFSIZE 4096
 #define ALL_PERMISIONS 0644
-#define READ_OP 1
-#define WRITE_OP 2
+#define READ_OP 0
+#define WRITE_OP 1
 #define MAX_ARGUMENTS 10
 #define WORD_LEN 50
 
@@ -239,6 +239,7 @@ int so_fflush(SO_FILE *stream)
                 return SO_EOF;
             }
         }
+        //printf("%d\n", bytes_written);
         // Retine ca cititi bytii din buffer care au fost scrisi in fisier
         stream->bytes_read += bytes_written;
         
@@ -299,22 +300,27 @@ int so_ferror(SO_FILE *stream) {
 
 
 
-char** parse_command(char *command)
+char **parse_command(char *command, int *count)
 {
-    int count = 0;
-    char** argument_list = malloc(MAX_ARGUMENTS * sizeof(char*));
+    
+    char **argument_list = (char **)malloc(MAX_ARGUMENTS * sizeof(char *));
     for (int i = 0; i < MAX_ARGUMENTS; i++) {
         argument_list[i] = malloc(WORD_LEN * sizeof(char));
     }
     char *token;
-    token = strtok(command, " ");
+    token = strtok(command, " >");
    
    /* walk through other tokens */
     while( token != NULL ) {
-        strcpy(argument_list[count++], token);
-        token = strtok(NULL, " ");
+        strcpy(argument_list[(*count)++], token);
+        token = strtok(NULL, " >");
     }
-    argument_list[count++] = NULL;
+    // Elibereaza memoria inainte de a face NULL ca sa nu se piarda
+    free(argument_list[(*count)]);
+    argument_list[(*count)++] = NULL;
+    // for (int i = 0; i < (*count) - 1; i++) {
+    //     printf("%s\n", argument_list[i]);
+    // }
     return argument_list;
 }
 
@@ -322,21 +328,22 @@ char** parse_command(char *command)
 SO_FILE *so_popen(const char *command, const char *type)
 {
     
-    char precomm[] = "sh -c ";
+    char* precomm[] = {"sh", "-c"};
     pid_t pid;
-    int rc;
+    int rc, fd;
     SO_FILE* fp;
     int filedes[2];
+    int count = 0;
     
-    char** argument_list = parse_command((char *)command);
+    char** argument_list = parse_command((char *)command, &count);
     
-    fp = init_so_file(-1);
+    fp = init_so_file(10);
 
     
     rc = pipe(filedes);
     if (rc < 0) {
         perror("Pipe failed");
-        return NULL;
+        goto end_error;
     }
 
     fp->pid = fork();
@@ -344,31 +351,60 @@ SO_FILE *so_popen(const char *command, const char *type)
     {
         case -1:
             perror("fork failed");
-            return NULL;
+            goto end_error;
         case 0: /*Procesul copil */
             // Redirectare
             
             if (strcmp(type, "r") == 0) {
-                rc = dup2(filedes[0], STDIN_FILENO);
+                close(filedes[READ_OP]);
+                rc = dup2(filedes[WRITE_OP], STDOUT_FILENO);
+               
+               // fd = open(argument_list[count - 2], O_CREAT | O_WRONLY, ALL_PERMISIONS);
+               
             } else if (strcmp(type, "w") == 0) {
-                //rc = dup2(file_descriptor, filedes[1]);
+                close(filedes[WRITE_OP]);
+                rc = dup2(filedes[READ_OP], STDIN_FILENO);
+                fd = open(argument_list[count - 2], O_CREAT | O_WRONLY, ALL_PERMISIONS);
+                fp->file_descriptor = fd;
+                
             }
-
-           // rc = execvp(argument_list[0], argument_list);
+            
+            rc = execvp(argument_list[0], argument_list);
             if (rc < 0) {
                 perror("Execvp failed");
-                return NULL;
+                goto end_error;
             }
-            return fp;
+            goto end_success;
         default:
-            // Procesul parinte asteapta ca procesul copil sa termine executia
-            return fp;
+            // Procesul parinte
+            if (strcmp(type, "r") == 0) {
+                close(filedes[WRITE_OP]);
+                rc = dup2(filedes[READ_OP], fp->file_descriptor);
+            } else if (strcmp(type, "w") == 0) {
+                close(filedes[READ_OP]);
+                rc = dup2(filedes[WRITE_OP], fp->file_descriptor);
+            }
+            
+            goto end_success;
     }
+    
+
+end_error:
+    for (int i = 0; i < MAX_ARGUMENTS; i++) {
+        free(argument_list[i]);
+    }
+    free(argument_list);
+    so_pclose(fp);
+    global_error_flag = 1;
+    return NULL;
+
+end_success:
     for (int i = 0; i < MAX_ARGUMENTS; i++) {
         free(argument_list[i]);
     }
     free(argument_list);
     return fp;
+
 }
 
 int so_pclose(SO_FILE *stream)
@@ -378,11 +414,20 @@ int so_pclose(SO_FILE *stream)
 
     wait_rc = waitpid(stream->pid, &status, 0);
     if (wait_rc < 0) {
-        return -1;
+        goto return_error;
     }
 
+    goto return_success;
+
+return_success:
     free(stream->buffer);
     free(stream);
+    return status;
 
-    return wait_rc;
+return_error:
+    free(stream->buffer);
+    free(stream);
+    global_error_flag = 1;
+    return -1;
+
 }
