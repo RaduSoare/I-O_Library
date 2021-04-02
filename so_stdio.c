@@ -6,9 +6,10 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 #include "so_stdio.h"
-#include "utils/utils.h"
 
 #define BUFSIZE 4096
 #define ALL_PERMISIONS 0644
@@ -308,12 +309,12 @@ char **parse_command(char *command, int *count)
         argument_list[i] = malloc(WORD_LEN * sizeof(char));
     }
     char *token;
-    token = strtok(command, " >");
+    token = strtok(command, " ");
    
    /* walk through other tokens */
     while( token != NULL ) {
         strcpy(argument_list[(*count)++], token);
-        token = strtok(NULL, " >");
+        token = strtok(NULL, " ");
     }
     // Elibereaza memoria inainte de a face NULL ca sa nu se piarda
     free(argument_list[(*count)]);
@@ -327,90 +328,116 @@ char **parse_command(char *command, int *count)
 
 SO_FILE *so_popen(const char *command, const char *type)
 {
-    
+
     char* precomm[] = {"sh", "-c"};
     pid_t pid;
     int rc, fd;
-    SO_FILE* fp;
+    SO_FILE *fp;
+    SO_FILE *ret_val = NULL;
     int filedes[2];
     int count = 0;
-    
-    char** argument_list = parse_command((char *)command, &count);
-    
+
+    char **arglist = calloc(MAX_ARGUMENTS , sizeof(char*));
+    for(int i = 0; i < MAX_ARGUMENTS; i++)
+    {
+        arglist[i] = calloc(WORD_LEN, sizeof(char));
+    }
+
+    strncpy(arglist[0], "sh", 2);
+    strncpy(arglist[1], "-c", 2);
+    strncpy(arglist[2], command, strlen(command));
+
     fp = init_so_file(10);
 
-    
     rc = pipe(filedes);
     if (rc < 0) {
         perror("Pipe failed");
-        goto end_error;
-    }
+        global_error_flag = 1;
+    } else {
+        fp->pid = fork();
+        switch (fp->pid)
+        {
+            case -1:
+                perror("fork failed");
+                global_error_flag = 1;
+                break;
+            case 0:
+            /* Child process */
+                if (type[0] == 'r')
+                {
+                    close(filedes[READ_OP]);
+                    /* stdout and pipe[write] are now pointing to same underlying stream, stdout */
+                    rc = dup2(filedes[WRITE_OP], STDOUT_FILENO);
+                    /* However, they have different values and are different fds, we can close one of them */
+                    close(filedes[WRITE_OP]);
 
-    fp->pid = fork();
-    switch (fp->pid)
-    {
-        case -1:
-            perror("fork failed");
-            goto end_error;
-        case 0: /*Procesul copil */
-            // Redirectare
-            
-            if (strcmp(type, "r") == 0) {
-                close(filedes[READ_OP]);
-                rc = dup2(filedes[WRITE_OP], STDOUT_FILENO);
-               
-               // fd = open(argument_list[count - 2], O_CREAT | O_WRONLY, ALL_PERMISIONS);
-               
-            } else if (strcmp(type, "w") == 0) {
-                close(filedes[WRITE_OP]);
-                rc = dup2(filedes[READ_OP], STDIN_FILENO);
-                fd = open(argument_list[count - 2], O_CREAT | O_WRONLY, ALL_PERMISIONS);
-                fp->file_descriptor = fd;
+                } else if (type[0] == 'w') {
+                    close(filedes[WRITE_OP]);
+                    rc = dup2(filedes[READ_OP], STDIN_FILENO);
+                    close(filedes[READ_OP]);
+                }
                 
-            }
-            
-            rc = execvp(argument_list[0], argument_list);
-            if (rc < 0) {
-                perror("Execvp failed");
-                goto end_error;
-            }
-            goto end_success;
-        default:
-            // Procesul parinte
-            if (strcmp(type, "r") == 0) {
-                close(filedes[WRITE_OP]);
-                rc = dup2(filedes[READ_OP], fp->file_descriptor);
-            } else if (strcmp(type, "w") == 0) {
-                close(filedes[READ_OP]);
-                rc = dup2(filedes[WRITE_OP], fp->file_descriptor);
-            }
-            
-            goto end_success;
-    }
-    
+                rc = execvp(arglist[0], arglist); /* Nothing is executed after execvp is reached, unless execvp fails -> if check is useless */
+                if (rc < 0) {
+                    perror("Execvp failed");
+                    free(fp->buffer);
+                    free(fp);
 
-end_error:
+                    for (int i = 0; i < MAX_ARGUMENTS; i++) {
+                        free(arglist[i]);
+                    }
+                    free(arglist);
+                    exit(-1); /* Execve should never return, if it does we should also close child process */
+                }
+                break;
+            default:
+            /* Parent */
+                if (strcmp(type, "r") == 0) {
+                    close(filedes[WRITE_OP]);
+
+                    /* fp->fd and pipe[read] now point to same underlying stream */
+                    fp->file_descriptor = filedes[READ_OP];
+                    /* However, they are 2 different descriptors, so one of them needs to be closed */
+                    // close(filedes[READ_OP]);
+
+                } else if (strcmp(type, "w") == 0) {
+                    /* Vice-versa to "r" branch */
+                    close(filedes[READ_OP]);
+                    fp->file_descriptor = filedes[WRITE_OP];
+                    // close(filedes[WRITE_OP]);
+                }
+
+                ret_val = fp;
+        }
+    }
+
     for (int i = 0; i < MAX_ARGUMENTS; i++) {
-        free(argument_list[i]);
+        free(arglist[i]);
     }
-    free(argument_list);
-    so_pclose(fp);
-    global_error_flag = 1;
-    return NULL;
+    free(arglist);
 
-end_success:
-    for (int i = 0; i < MAX_ARGUMENTS; i++) {
-        free(argument_list[i]);
+    if (!ret_val)
+    {
+        /* Structure which will be returned is invalid, deallocate initially allocated one */
+        free(fp->buffer);
+        free(fp);
     }
-    free(argument_list);
-    return fp;
 
+    return ret_val;
 }
 
 int so_pclose(SO_FILE *stream)
 {
     int wait_rc;
     int status;
+
+    int rc = so_fflush(stream);
+    if (rc < 0) {
+        perror("fflush failed.");
+        goto return_error;
+    }
+    rc = close(stream->file_descriptor);
+
 
     wait_rc = waitpid(stream->pid, &status, 0);
     if (wait_rc < 0) {
@@ -422,6 +449,7 @@ int so_pclose(SO_FILE *stream)
 return_success:
     free(stream->buffer);
     free(stream);
+
     return status;
 
 return_error:
