@@ -1,40 +1,39 @@
-	#include <stdio.h>
-	#include <stdlib.h>
-	#include <string.h>
-	#include <sys/stat.h>
-	#include <sys/types.h>
-	#include <sys/wait.h>
-	#include <fcntl.h>
-	#include <unistd.h>
-	#include <sys/types.h>
-	#include <sys/wait.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
-	#include "so_stdio.h"
+#include "so_stdio.h"
 
-	#define BUFSIZE 4096
-	#define ALL_PERMISIONS 0644
-	#define READ_OP 0
-	#define WRITE_OP 1
-	#define MAX_ARGUMENTS 10
-	#define WORD_LEN 50
+#define BUFSIZE 4096
+#define ALL_PERMISIONS 0644
+#define READ_OP 0
+#define WRITE_OP 1
+#define MAX_ARGUMENTS 10
+#define WORD_LEN 50
 
-	int global_error_flag = 0;
 
-	struct _so_file {
+struct _so_file {
 	int file_descriptor;
 	char *buffer;
 	int bytes_in_buffer;
 	int buffer_position;
 	int last_operation;
 	int reached_end;
-	int bytes_read;
+	int computed_bytes;
 	int error_flag;
 	int child_pid;
-	};
+};
 
 	// Aloca structura SO_FILE
-	SO_FILE *init_so_file(int file_descriptor)
-	{
+SO_FILE *init_so_file(int file_descriptor)
+{
 	SO_FILE *file_pointer;
 
 	file_pointer = malloc(sizeof(SO_FILE));
@@ -46,10 +45,11 @@
 	file_pointer->file_descriptor = file_descriptor;
 	file_pointer->buffer_position = 0; // Pozitia din buffer la care se afla cursorul
 	file_pointer->bytes_in_buffer = 0; // Cati bytes se afla in bufferul curent
-	file_pointer->bytes_read = 0; // Cati bytes am citit in total
+	file_pointer->computed_bytes = 0; // Cati bytes am citit in total
 	file_pointer->last_operation = -1; // Retine daca ultima operatie a fost citire/scriere
 	file_pointer->reached_end = 0; // 1 -> a ajuns la sfarsitul fisierului
 	file_pointer->child_pid = 0; // pid-ul procesului creat cu fork
+	file_pointer->error_flag = 0;// 1 -> pe parcursul programului a aparut o eroare 
 	file_pointer->buffer = malloc(BUFSIZE * sizeof(char));
 	if (file_pointer->buffer == NULL) {
 		perror("Buffer allocation failed");
@@ -104,9 +104,8 @@ int deallocate_so_file(SO_FILE *fp, int ret)
 	if (ret >= 0)
 		return ret;
 
-	global_error_flag = 1;
 	return SO_EOF;
-	}
+}
 
 int so_fclose(SO_FILE *stream)
 {
@@ -144,7 +143,7 @@ int so_fgetc(SO_FILE *stream)
 
 		// Cand ajung la finalul bufferului, mut cursorul pentru cati bytes am reusit sa citesc
 		if (stream->buffer_position == stream->bytes_in_buffer)
-			stream->bytes_read += stream->bytes_in_buffer;
+			stream->computed_bytes += stream->bytes_in_buffer;
 
 		// Curat si reinitializez datele bufferului inainte de citire
 		stream->buffer_position = 0;
@@ -154,7 +153,7 @@ int so_fgetc(SO_FILE *stream)
 		// Marchez ca am ajuns la finalul bufferului
 		if (stream->bytes_in_buffer <= 0) {
 			stream->reached_end = 1;
-			global_error_flag = 1;
+			stream->error_flag = 1;
 			return SO_EOF;
 		}
 
@@ -178,7 +177,7 @@ size_t so_fread(void *ptr, size_t size, size_t nmemb, SO_FILE *stream)
 		// Citeste un caracter
 		char_read = so_fgetc(stream);
 		if (char_read == SO_EOF) {
-			global_error_flag = 1;
+			stream->error_flag = 1;
 			// In caz de eroare returneaza numarul de elemente citite pana la eroare
 			return i;
 		}
@@ -201,7 +200,7 @@ int so_fputc(int c, SO_FILE *stream)
 		rc = so_fflush(stream);
 		if (rc < 0) {
 			perror("Fflush failed.");
-			global_error_flag = 1;
+			stream->error_flag = 1;
 			return SO_EOF;
 		}
 	}
@@ -225,7 +224,7 @@ size_t so_fwrite(const void *ptr, size_t size, size_t nmemb, SO_FILE *stream)
 
 		if (byte_written == SO_EOF) {
 			perror("Fputc failed.");
-			global_error_flag = 1;
+			stream->error_flag = 1;
 			return i;
 		}
 	}
@@ -256,12 +255,12 @@ int so_fflush(SO_FILE *stream)
 
 			if (bytes_written_now <= 0) {
 				perror("Fflush error.");
-				global_error_flag = 1;
+				stream->error_flag = 1;
 				return SO_EOF;
 			}
 		}
 		// Retine ca cititi bytii din buffer care au fost scrisi in fisier
-		stream->bytes_read += bytes_written;
+		stream->computed_bytes += bytes_written;
 
 	}
 	// Curata si reinitilizeaza bufferul
@@ -286,7 +285,7 @@ int so_fseek(SO_FILE *stream, long offset, int whence)
 		rc = so_fflush(stream);
 		if (rc < 0) {
 			perror("Fflush failed.");
-			global_error_flag = 1;
+			stream->error_flag = 1;
 			return SO_EOF;
 		}
 
@@ -295,11 +294,11 @@ int so_fseek(SO_FILE *stream, long offset, int whence)
 	new_pos = lseek(stream->file_descriptor, offset, whence);
 	if (new_pos < 0) {
 		perror("Lseek failed.");
-		global_error_flag = 1;
+		stream->error_flag = 1;
 		return SO_EOF;
 	}
 
-	stream->bytes_read = new_pos;
+	stream->computed_bytes = new_pos;
 	return 0;
 
 }
@@ -310,7 +309,7 @@ long so_ftell(SO_FILE *stream)
 	 *	Calculeaza pozitia curenta a cursorului in functie de cati byti s-au citit
 	 *	in total + cati byti se afla in buffer in momentul respectiv
 	 */
-	return stream->buffer_position + stream->bytes_read;
+	return stream->buffer_position + stream->computed_bytes;
 }
 
 int so_feof(SO_FILE *stream)
@@ -322,7 +321,7 @@ int so_feof(SO_FILE *stream)
 int so_ferror(SO_FILE *stream)
 {
 	// Verifica flagul pentru erori
-	return global_error_flag == 1 ? 1 : 0;
+	return stream->error_flag == 1 ? 1 : 0;
 }
 
 /* Functii procese */
@@ -366,7 +365,7 @@ SO_FILE *so_popen(const char *command, const char *type)
 	rc = pipe(filedes);
 	if (rc < 0) {
 		perror("Pipe failed");
-		global_error_flag = 1;
+		fp->error_flag = 1;
 		return NULL;
 	}
 
@@ -374,7 +373,7 @@ SO_FILE *so_popen(const char *command, const char *type)
 	switch (fp->child_pid) {
 	case -1:
 		perror("fork failed");
-		global_error_flag = 1;
+		fp->error_flag = 1;
 		break;
 	case 0:
 	// Procesul copil

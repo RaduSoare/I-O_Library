@@ -1,0 +1,56 @@
+===============================================================================
+    Soare Radu-Georgian
+    336CB
+    Tema2 SO
+===============================================================================
+
+Idei de implementare:
+
+-- Operatii IO -- 
+    Implementarea s-a bazat pe o structura SO_FILE care retine date despre bufferul 
+care "mediaza" datele si despre fisierul deschis. In aceasta se gasesc date ca:
+file descriptor, datele efective din buffer, dimensiunea acestuia, cati byti au fost
+prelucrati (cititi sau scrisi) si flaguri de EOF si eroare.
+    Citirea s-a bazat pe syscall-ul read care se face doar atunci cand bufferul e gol
+sau cand s-au citit toate datele din buffer, iar atunci e nevoie ca acesta sa fie golit
+si populat cu date noi. Altfel datele se iau din buffer.
+    Scrierea s-a bazat pe syscall-ul write care se face in apelul fflush.
+Fflush se apeleaza cand bufferul s-a umplut si datele trebuie scrise in fisier pentru a face
+loc datelor noi. Daca buferul nu este plin, se adauga la pozitia curenta caracterul dorit.
+Syscall-ul write a fost scris intr-o bucla pentru a se asigura faptul ca acesta scrie
+numarul de byti dorit.
+
+-- Operatii cu Procese --
+    Pentru a executa o comanda, am alocat un array de "string-uri" pe care l-am populat
+cu tokenii "sh -c", apoi comanda dorita, urmata de NULL. Am alocat o structura SO_FILE
+careia i-am pasat primul descriptor liber obtinut printr-un apel "dummy" de OPEN.
+Am creat un pipe intre procesul parinte si procesul copil obtinut cu FORK.
+    
+* Descriere flow type == 'w' ( pentru 'r' se "inverseaza" operatiile): *
+    Atunci cand se doreste o scriere pe structura SO_FILE, aceasta este redirectata catre
+capatul deschis pentru scriere al pipe-ului (teoretic ar fi trebuit cu dup2, dar din 
+motive necunoscute operatia se bloca, asa ca am asignat efectiv descriptorul din structura
+la descriptorul capatului de scriere). In procesul copil, am redirectat cu dup2 citirea standard
+la capatul de citire al pipe-ului si astfel operatiile din procesul parinte
+se executau asupra procesului copil. 
+    Procesul copil executa comanda primita ca parametru cu ajutorul functiei execvp care
+inlocuieste imaginea procesului cu procesul creat de comanda din array-ul de tokeni creat.
+    
+    Cand nu mai sunt operatii de executat, se face fflush pentru a goli bufferul in fisier,
+se dezaloca structura SO_FILE, iar procesul parinte asteapta ca procesul copil
+sa-si termine executia.
+
+Probleme: 
+- a fost foarte greu sa fac debugging pe teste, tot ce puteam face era sa
+verific lungimile verificate in testele care contineau functia compare_files.
+- a durat ceva sa realizez ca write chiar poate sa nu scrie mereu atat cat se doreste.
+- popen a necesitat o intelegere foarte clara a felului in care functioneaza pipe-ul
+pentru a putea transmite corect datele.
+- popen write mi-a pus probleme deoarece comanda "wc -c" se bloca si am rezolvat schimband
+redirectarea cu dup2 intr-o asignare.
+
+Feedback: 
+    Desi tema "reinventeaza roata" - implementam o biblioteca deja existenta, ajuta mult
+la intelegerea felului in care functioneaza apelurile de sistem.
+    Pe viitor ar fi util ca testele sa genereze niste fisiere .ref pentru ca studentii
+sa poata compara cu .out-urile lor pt debugging.
